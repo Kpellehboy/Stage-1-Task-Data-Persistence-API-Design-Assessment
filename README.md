@@ -247,8 +247,6 @@ Write unit and integration tests (Jest).
 
 Add JWT authentication.
 
-License
-ISC
 
 Author
 Elijah M Flomo – Backend Engineering Intern
