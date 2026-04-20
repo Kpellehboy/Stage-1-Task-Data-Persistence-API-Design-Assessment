@@ -43,7 +43,10 @@ Supports the following query parameters (all optional):
 
 **Example request:**
 ```
-GET /api/profiles?gender=male&country_id=NG&min_age=25&sort_by=age&order=desc&page=2&limit=10
+GET /api/profiles/019dabc1-b221-742f-a00d-fb0f4dc7db15
+
+<img width="812" height="346" alt="image" src="https://github.com/user-attachments/assets/62fecd1f-0207-437a-8fcb-ab6551bc7f55" />
+
 ```
 
 **Example response (200 OK):**
