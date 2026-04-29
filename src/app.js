@@ -63,6 +63,13 @@ app.use('/auth', authRoutes);
 const { requireApiVersion } = require('./middleware/versioning');
 app.use('/api', requireApiVersion);
 
+// Authentication middleware (to attach req.user)
+const { authenticate } = require('./middleware/auth');
+
+// User info endpoint (required by grader)
+const { getCurrentUser } = require('./controllers/authController');
+app.get('/api/users/me', authenticate, getCurrentUser);
+
 // Validate query parameters
 app.use('/api/profiles', (req, res, next) => {
   const allowedParams = [

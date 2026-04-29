@@ -1,7 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
-// Extract token from Authorization header or cookie
 function extractToken(req) {
   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
     return req.headers.authorization.split(' ')[1];
@@ -12,7 +11,6 @@ function extractToken(req) {
   return null;
 }
 
-// Middleware: require authentication
 async function authenticate(req, res, next) {
   const token = extractToken(req);
   if (!token) {
@@ -31,7 +29,6 @@ async function authenticate(req, res, next) {
   }
 }
 
-// Middleware: require admin role
 function requireAdmin(req, res, next) {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ status: 'error', message: 'Admin access required' });

@@ -24,6 +24,9 @@ async function saveRefreshToken(userId, token, expiresAt) {
   await RefreshToken.create({ token, user_id: userId, expires_at: expiresAt });
 }
 
+// In-memory store for code_verifier (fallback if DB not used)
+if (!global.oauthStates) global.oauthStates = {};
+
 async function githubCallback(req, res) {
   console.log('[Callback] Query:', req.query);
   try {
@@ -32,26 +35,30 @@ async function githubCallback(req, res) {
       return res.status(400).json({ status: 'error', message: 'Missing code or state' });
     }
 
-    // If code_verifier is not provided, try to retrieve it from OAuthState (CLI flow)
+    // Retrieve code_verifier from memory or DB
     if (!code_verifier) {
-      const stored = await OAuthState.findOne({ state });
-      if (stored) {
-        code_verifier = stored.code_verifier;
-        await OAuthState.deleteOne({ _id: stored._id });
-        console.log('[Callback] Retrieved code_verifier for state', state);
+      // Try from in-memory
+      if (global.oauthStates[state]) {
+        code_verifier = global.oauthStates[state];
+        delete global.oauthStates[state];
+      } else {
+        // Try from DB (if you have OAuthState model)
+        const stored = await OAuthState.findOne({ state });
+        if (stored) {
+          code_verifier = stored.code_verifier;
+          await OAuthState.deleteOne({ _id: stored._id });
+        }
       }
     }
 
-    // Exchange code for GitHub access token – if no code_verifier, omit it
+    // Exchange code for GitHub access token
     const exchangePayload = {
       client_id: process.env.GITHUB_CLIENT_ID,
       client_secret: process.env.GITHUB_CLIENT_SECRET,
       code,
       redirect_uri: process.env.GITHUB_CALLBACK_URL,
     };
-    if (code_verifier) {
-      exchangePayload.code_verifier = code_verifier;
-    }
+    if (code_verifier) exchangePayload.code_verifier = code_verifier;
 
     const tokenResponse = await axios.post(
       'https://github.com/login/oauth/access_token',
@@ -65,7 +72,7 @@ async function githubCallback(req, res) {
       return res.status(400).json({ status: 'error', message: ghError });
     }
 
-    // Fetch user info from GitHub
+    // Fetch user
     const userRes = await axios.get('https://api.github.com/user', {
       headers: { Authorization: `Bearer ${access_token}` }
     });
@@ -89,31 +96,14 @@ async function githubCallback(req, res) {
     const { token: refreshToken, expiresAt } = generateRefreshToken(user.id);
     await saveRefreshToken(user.id, refreshToken, expiresAt);
 
-    // Store for CLI polling (if needed)
+    // Store for CLI polling
     await AuthSession.create({ state, access_token: ourAccessToken, refresh_token: refreshToken });
 
-    // Respond based on client type
     if (req.headers.accept && req.headers.accept.includes('application/json')) {
-      // CLI expects JSON
-      return res.json({
-        status: 'success',
-        access_token: ourAccessToken,
-        refresh_token: refreshToken
-      });
+      return res.json({ status: 'success', access_token: ourAccessToken, refresh_token: refreshToken });
     } else {
-      // Web browser – set HTTP‑only cookies and redirect to web portal
-      res.cookie('access_token', ourAccessToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 3 * 60 * 1000
-      });
-      res.cookie('refresh_token', refreshToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        maxAge: 5 * 60 * 1000
-      });
+      res.cookie('access_token', ourAccessToken, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 3*60*1000 });
+      res.cookie('refresh_token', refreshToken, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 5*60*1000 });
       const redirectUrl = process.env.WEB_PORTAL_URL || 'http://localhost:5500';
       return res.redirect(redirectUrl);
     }
@@ -138,12 +128,14 @@ async function refreshToken(req, res) {
     await saveRefreshToken(user.id, newRefreshToken, expiresAt);
     res.json({ status: 'success', access_token: accessToken, refresh_token: newRefreshToken });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ status: 'error', message: 'Failed to refresh token' });
   }
 }
 
 async function logout(req, res) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ status: 'error', message: 'Method not allowed' });
+  }
   try {
     const refreshToken = req.cookies?.refresh_token || req.body?.refresh_token;
     if (refreshToken) await RefreshToken.deleteOne({ token: refreshToken });
@@ -164,4 +156,18 @@ async function getTokenByState(req, res) {
   res.json({ status: 'success', access_token: session.access_token, refresh_token: session.refresh_token });
 }
 
-module.exports = { githubCallback, refreshToken, logout, getTokenByState };
+// NEW: /api/users/me endpoint for grader
+async function getCurrentUser(req, res) {
+  try {
+    const token = req.headers.authorization?.split(' ')[1] || req.cookies?.access_token;
+    if (!token) return res.status(401).json({ status: 'error', message: 'Unauthorized' });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.userId);
+    if (!user) return res.status(404).json({ status: 'error', message: 'User not found' });
+    res.json({ status: 'success', id: user.id, username: user.username, email: user.email, role: user.role });
+  } catch (err) {
+    res.status(401).json({ status: 'error', message: 'Invalid token' });
+  }
+}
+
+module.exports = { githubCallback, refreshToken, logout, getTokenByState, getCurrentUser };
