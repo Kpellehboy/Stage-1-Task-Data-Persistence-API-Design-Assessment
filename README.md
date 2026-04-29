@@ -1,204 +1,161 @@
-# Stage 2 – Intelligence Query Engine
+# Insighta Labs Backend – Secure Access & Multi‑Interface Integration (Stage 3)
 
 ## Overview
 
-This API extends the Stage 1 profile storage system with advanced query capabilities: filtering, sorting, pagination, and a natural language search endpoint. It serves demographic intelligence data for Insighta Labs.
+This is the production backend for Insighta Labs+, a demographic intelligence platform. It builds on Stage 2 by adding:
 
-## Base URL
+- GitHub OAuth with PKCE (web + CLI)
+- Access & refresh tokens (JWT, short expiry)
+- Role‑based access control (admin / analyst)
+- API versioning (`X-API-Version: 1`)
+- Pagination links (`total_pages`, `self`, `next`, `prev`)
+- CSV profile export
+- Rate limiting & request logging
+- Deployed on Vercel
 
-`https://stage-1-task-data-persistence-api-d.vercel.app`
+All Stage 2 features (filtering, sorting, pagination, natural language search) remain intact.
 
-## Endpoints
+## Live URL
 
-| Method | Endpoint                     | Description |
-|--------|------------------------------|-------------|
-| POST   | `/api/profiles`              | Create a new profile (idempotent) |
-| GET    | `/api/profiles/:id`          | Retrieve a single profile by UUID v7 |
-| GET    | `/api/profiles`              | List profiles with filtering, sorting, pagination |
-| DELETE | `/api/profiles/:id`          | Delete a profile |
-| GET    | `/api/profiles/search`       | Natural language query |
+**Backend** – [https://build-insighta-labs-secure-access-m.vercel.app](https://build-insighta-labs-secure-access-m.vercel.app)
 
----
+## System Architecture
 
-## Enhanced `GET /api/profiles`
+- **Runtime**: Node.js 20+ / Express
+- **Database**: MongoDB Atlas + Mongoose
+- **Authentication**: GitHub OAuth with PKCE (Proof Key for Code Exchange)
+- **Token management**: JWT access tokens (3 min), refresh tokens (5 min, stored in DB)
+- **Deployment**: Vercel (serverless functions)
+- **Structure**: Clean architecture – controllers, services, models, routes, middleware
 
-Supports the following query parameters (all optional):
+## Authentication Flow (OAuth + PKCE)
 
-### Filters
-- `gender` – `male` or `female`
-- `age_group` – `child`, `teenager`, `adult`, `senior`
-- `country_id` – two‑letter ISO code (e.g., `NG`, `KE`)
-- `min_age` – integer, minimum age
-- `max_age` – integer, maximum age
-- `min_gender_probability` – float (0–1)
-- `min_country_probability` – float (0–1)
+### For Web Portal (HTTP‑only cookies)
 
-### Sorting
-- `sort_by` – `age`, `created_at`, `gender_probability`
-- `order` – `asc` or `desc` (default `desc` for `created_at`)
+1. User clicks “Continue with GitHub” → `GET /auth/github`.
+2. Backend generates a `state` and redirects to GitHub.
+3. User authorises on GitHub; GitHub redirects to `GET /auth/github/callback` with `code` and `state`.
+4. Backend exchanges `code` for a GitHub access token (no PKCE for web flow).
+5. Backend fetches user info, creates/updates a local user, and issues:
+   - `access_token` (JWT, expires 3 min)
+   - `refresh_token` (random, expires 5 min, stored in DB)
+6. Both tokens are set as `httpOnly` cookies and the user is redirected to the web portal dashboard.
 
-### Pagination
-- `page` – default `1`
-- `limit` – default `10`, maximum `50`
+### For CLI (PKCE + polling)
 
-**Example request:**
-```
-GET /api/profiles/019dabc1-b221-742f-a00d-fb0f4dc7db15
-```
-<img width="369" height="271" alt="image" src="https://github.com/user-attachments/assets/4254af1e-2c7b-4333-ad3c-453c0852d265" />
+1. `insighta login` generates `code_verifier`, `code_challenge` and `state`.
+2. CLI opens browser to `GET /auth/github?state=...&code_challenge=...&code_verifier=...`.
+3. Backend stores `code_verifier` in `OAuthState` collection (expires after 5 min).
+4. User authorises; GitHub redirects to `/auth/github/callback` with `code` and `state`.
+5. Backend retrieves `code_verifier` using `state`, exchanges `code + code_verifier` for GitHub token.
+6. Backend creates local user, issues access + refresh tokens, and stores them in `AuthSession` keyed by `state`.
+7. CLI polls `GET /auth/token?state=...` every 2 seconds until tokens are ready, then stores them locally.
 
-**Example response (200 OK):**
+## Token Lifecycle
+
+| Token | Expiry | Storage | Renewal |
+|-------|--------|---------|---------|
+| Access token (JWT) | 3 minutes | Cookie (web) or local file (CLI) | Using refresh token via `POST /auth/refresh` |
+| Refresh token | 5 minutes | DB + cookie (web) / local file (CLI) | Invalidated after use; new pair issued |
+
+- **Web**: refresh token is `httpOnly` cookie, renewed automatically on expiry.
+- **CLI**: auto‑refresh on 401 responses; if refresh fails, user must re‑run `insighta login`.
+
+## Role‑Based Access Control (RBAC)
+
+Two roles are enforced by middleware on every `/api/*` endpoint:
+
+| Role   | Permissions                                                                 |
+|--------|-----------------------------------------------------------------------------|
+| Admin  | Full access: `POST /api/profiles`, `DELETE /api/profiles/:id`, all `GET`    |
+| Analyst| Read‑only: all `GET` endpoints (`/api/profiles`, `/api/profiles/:id`, `/api/profiles/search`, `/api/profiles/export`) |
+
+Default role for new users is `analyst`.  
+If `is_active` is `false`, all requests return `403 Forbidden`.
+
+## API Versioning
+
+All requests to `/api/*` must include the header:
+X-API-Version: 1
+
+text
+
+Missing or invalid version → `400 Bad Request` with:
 ```json
+{ "status": "error", "message": "API version header required" }
+Updated Pagination (Stage 3)
+GET /api/profiles and GET /api/profiles/search now return:
+
+json
 {
   "status": "success",
-  "page": 2,
+  "page": 1,
   "limit": 10,
   "total": 2026,
+  "total_pages": 203,
+  "links": {
+    "self": "/api/profiles?page=1&limit=10",
+    "next": "/api/profiles?page=2&limit=10",
+    "prev": null
+  },
   "data": [ ... ]
 }
-```
+CSV Export
+Endpoint: GET /api/profiles/export?format=csv
 
----
+Accepts the same filters, sorting and pagination parameters as GET /api/profiles (though pagination is ignored for export – all matching records are returned).
 
-## Natural Language Search `GET /api/profiles/search`
+Response:
 
-Converts plain English queries into structured filters using rule‑based parsing (no AI/LLM).
+200 OK with Content-Type: text/csv
 
-**Example:**
-```
-GET /api/profiles/search?q=young males from nigeria&page=1&limit=10
-```
+Content-Disposition: attachment; filename="profiles_<timestamp>.csv"
 
-### Parsing Approach
+Columns: id,name,gender,gender_probability,age,age_group,country_id,country_name,country_probability,created_at
 
-The parser uses regex and keyword matching in the following order:
+Example:
 
-1. **Gender** – looks for `male` or `female`.
-2. **Age group / age range** –  
-   - `young` → `min_age=16`, `max_age=24` (for parsing only, not stored as age group)  
-   - `teenager` / `teens` → `age_group=teenager`  
-   - `adult` → `age_group=adult`  
-   - `senior` / `old` → `age_group=senior`  
-   - `child` / `kid` → `age_group=child`  
-   - `above X` → `min_age=X`  
-   - `below X` → `max_age=X`
-3. **Country** – matches `from <country_name>` using a mapping table of common country names to ISO codes (e.g., `nigeria` → `NG`). Only exact lower‑case matches are supported.
+text
+https://build-insighta-labs-secure-access-m.vercel.app/api/profiles/export?format=csv&gender=male&country_id=NG
+Rate Limiting
+Endpoint group	Limit (per minute)
+/auth/*	10 requests
+/api/* (authenticated)	60 requests per user
+Exceeding the limit returns 429 Too Many Requests with:
 
-If multiple rules match, they are combined (AND logic). If the query cannot be interpreted, the API returns:
+json
+{ "status": "error", "message": "Too many requests, please try again later." }
+Logging
+All requests are logged using Morgan (combined format) to stdout (visible in Vercel logs).
 
-```json
-{ "status": "error", "message": "Unable to interpret query" }
-```
+Natural Language Search (unchanged from Stage 2)
+Rule‑based parser (no AI) for queries like "young males from nigeria".
+See the Stage 2 README for full details.
+Limitations: no boolean logic, no negation, single country only, limited country name mapping.
 
-### Supported Keywords & Mappings
+Repository
+GitHub: https://github.com/Kpellehboy/Build-Insighta-Labs-Secure-Access-Multi-Interface-Integration.git
 
-| Keyword          | Mapped Filter                          |
-|------------------|----------------------------------------|
-| `male`           | `gender=male`                          |
-| `female`         | `gender=female`                        |
-| `young`          | `min_age=16`, `max_age=24`             |
-| `teenager`/`teens` | `age_group=teenager`                 |
-| `adult`          | `age_group=adult`                      |
-| `senior`/`old`   | `age_group=senior`                     |
-| `child`/`kid`    | `age_group=child`                      |
-| `above X`        | `min_age=X`                            |
-| `below X`        | `max_age=X`                            |
-| `from <country>` | `country_id=<ISO_CODE>` (mapping)      |
+Related Repositories
+CLI tool: https://github.com/Kpellehboy/insighta-cli.git
 
-### Country Name Mapping (partial list)
+Web portal: https://github.com/Kpellehboy/insighta-web.git
 
-| Country name      | ISO code |
-|-------------------|----------|
-| nigeria           | NG       |
-| kenya             | KE       |
-| south africa      | ZA       |
-| ghana             | GH       |
-| angola            | AO       |
-| rwanda            | RW       |
-| ethiopia          | ET       |
-| senegal           | SN       |
-| mali              | ML       |
-| benin             | BJ       |
-| liberia           | LR       |
+Environment Variables (required on Vercel)
+Variable	Example
+MONGODB_URI	mongodb+srv://user:pass@cluster.mongodb.net/profileDB
+GITHUB_CLIENT_ID: " "
+GITHUB_CLIENT_SECRET " "
+GITHUB_CALLBACK_URL	https://build-insighta-labs-secure-access-m.vercel.app/auth/github/callback
+JWT_SECRET	(long random string)
+WEB_PORTAL_URL	https://insighta-web-mocha.vercel.app
+NODE_ENV	production
+Deployment (Vercel)
+Root directory: . (the repo root containing src/ and package.json)
 
----
+Build command: npm install
 
-## Limitations of the Natural Language Parser
+Output directory: not needed (Vercel defaults)
 
-The parser is intentionally simple and **does not** handle:
-
-- **Complex boolean logic** – `AND` / `OR` combinations (e.g., `males from nigeria or kenya`).
-- **Negation** – `not male` or `except teenagers`.
-- **Age ranges expressed as phrases** – `ages 20 to 30` (only `above`/`below`).
-- **Multiple countries** – only the first `from <country>` is used.
-- **Plurals or misspellings** – must use exact keywords as listed.
-- **Inference of age group from age numbers** – e.g., `age 25` will not set `age_group=adult` (but min/max age filters still work).
-- **Names or non‑demographic terms** – queries that contain only a name (e.g., `Elijah M Flomo`) return an error.
-- **Case sensitivity** – all matching is case‑insensitive, but country names must be spelled correctly.
-
-These limitations are intentional to keep the parser predictable and fast for a limited set of demographic queries.
-
----
-
-## Data Seeding
-
-The database is pre‑seeded with 2026 profiles from `seed_profiles.json`. To run the seed script:
-
-```bash
-npm run seed
-```
-
-The script upserts by `name`, so re‑running does not create duplicates.
-
----
-
-## Error Handling
-
-All errors follow the structure:
-
-```json
-{ "status": "error", "message": "<description>" }
-```
-
-Common status codes:
-- `400` – missing or invalid parameter, uninterpretable query
-- `404` – profile not found
-- `422` – invalid parameter type
-- `502` – external API failure (only on POST)
-- `500` – internal server error
-
-Invalid query parameters (e.g., `?invalid=foo`) return `400` with `"Invalid query parameters"`.
-
----
-
-## CORS
-
-`Access-Control-Allow-Origin: *` is enabled for all routes.
-
----
-
-## Tech Stack
-
-- Node.js 20+ / Express
-- MongoDB Atlas + Mongoose
-- UUID v7 for primary keys
-- Deployed on Vercel (serverless functions)
-
----
-
-## GitHub Repository
-
-https://github.com/Kpellehboy/Stage-1-Task-Data-Persistence-API-Design-Assessment.git
-
-Vercel Deployment url: https://stage-1-task-data-persistence-api-d.vercel.app/
-
----
-
-## Author
-
+Author
 Elijah M Flomo – Backend Engineering Intern
-
-*Built for Insighta Labs – Stage 2 Assessment*
-```
-
-Copy this entire block into your `README.md` file, commit, and push. The grader will check for the required sections (parsing approach and limitations). Good luck with your submission!
