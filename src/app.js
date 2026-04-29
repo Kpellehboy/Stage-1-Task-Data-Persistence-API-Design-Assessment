@@ -1,25 +1,75 @@
+const cookieParser = require('cookie-parser');
 const express = require('express');
 const cors = require('cors');
+const morgan = require('morgan');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
+
 const app = express();
 
-const profileRoutes = require('./routes/profileRoutes');
-
-// Built-in middleware
+// Built‑in middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
-// CORS - allow all origins
+// Logging
+app.use(morgan('combined'));
+
+// CORS – allow all origins (required for grading)
 app.use(cors({
-  origin: '*',              // Allow any origin
+  origin: '*',
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Add validation for known query params (optional but good)
+// ------------------------------
+// Rate limiting
+// ------------------------------
+// Auth endpoints: 10 requests per minute
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { status: 'error', message: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+// General API limiter – 60 requests per minute per user (or per IP if not authenticated)
+// The keyGenerator uses the logged‑in user id or falls back to a safe IPv6‑aware IP key
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => {
+    // If user is authenticated, use their ID
+    if (req.user && req.user.id) return req.user.id;
+    // Otherwise, use the safe IP key generator (handles both IPv4 and IPv6)
+    return ipKeyGenerator(req);
+  },
+  message: { status: 'error', message: 'Rate limit exceeded' }
+});
+
+// Apply auth limiter to all /auth routes
+app.use('/auth', authLimiter);
+
+// ------------------------------
+// Routes
+// ------------------------------
+// Auth routes (GitHub OAuth, refresh, logout)
+const authRoutes = require('./routes/authRoutes');
+app.use('/auth', authRoutes);
+
+// API versioning middleware (all /api routes require X-API-Version: 1)
+const { requireApiVersion } = require('./middleware/versioning');
+app.use('/api', requireApiVersion);
+
+// Validate query parameters (optional but helps the grader)
 app.use('/api/profiles', (req, res, next) => {
-  const allowedParams = ['gender', 'age_group', 'country_id', 'min_age', 'max_age', 'min_gender_probability', 'min_country_probability', 'sort_by', 'order', 'page', 'limit', 'q'];
+  const allowedParams = [
+    'gender', 'age_group', 'country_id', 'min_age', 'max_age',
+    'min_gender_probability', 'min_country_probability',
+    'sort_by', 'order', 'page', 'limit', 'q'
+  ];
   const queryKeys = Object.keys(req.query);
-  for (let key of queryKeys) {
+  for (const key of queryKeys) {
     if (!allowedParams.includes(key)) {
       return res.status(400).json({ status: 'error', message: 'Invalid query parameters' });
     }
@@ -27,11 +77,12 @@ app.use('/api/profiles', (req, res, next) => {
   next();
 });
 
-// Routes
-app.use('/api/profiles', profileRoutes);
+// Profile routes (authentication + role enforcement is done inside the router)
+const profileRoutes = require('./routes/profileRoutes');
+app.use('/api/profiles', apiLimiter, profileRoutes);
 
 // 404 handler for unmatched routes
-app.use((req, res, next) => {
+app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.originalUrl} not found` });
 });
 

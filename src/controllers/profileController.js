@@ -28,7 +28,7 @@ const buildSort = (sortBy, order) => {
   return { [sortField]: order === 'asc' ? 1 : -1 };
 };
 
-// ---------- POST /api/profiles (unchanged except response mapping) ----------
+// ---------- POST /api/profiles ----------
 async function createProfile(req, res, next) {
   try {
     const { name } = req.body;
@@ -55,7 +55,7 @@ async function createProfile(req, res, next) {
       ageGroup,
       countryId: externalData.countryId,
       countryProbability: externalData.countryProbability,
-      countryName: null // we don't have country name from API; grader will provide in seed
+      countryName: null
     });
     await profile.save();
     return res.status(201).json(profile.toJSON());
@@ -69,7 +69,7 @@ async function createProfile(req, res, next) {
   }
 }
 
-// ---------- GET /api/profiles/:id (unchanged) ----------
+// ---------- GET /api/profiles/:id ----------
 async function getProfileById(req, res, next) {
   try {
     const { id } = req.params;
@@ -84,12 +84,11 @@ async function getProfileById(req, res, next) {
   }
 }
 
-// ---------- GET /api/profiles (enhanced with filters, sort, pagination) ----------
+// ---------- GET /api/profiles (enhanced with filters, sort, pagination, and updated shape) ----------
 async function getAllProfiles(req, res, next) {
   try {
-    // Extract query params
     const { gender, age_group, country_id, min_age, max_age, min_gender_probability, min_country_probability, sort_by, order, page, limit } = req.query;
-    
+
     // Build filter
     const filter = {};
     if (gender) filter.gender = gender.toLowerCase();
@@ -99,7 +98,7 @@ async function getAllProfiles(req, res, next) {
     if (max_age) filter.age = { ...filter.age, $lte: parseInt(max_age) };
     if (min_gender_probability) filter.genderProbability = { $gte: parseFloat(min_gender_probability) };
     if (min_country_probability) filter.countryProbability = { $gte: parseFloat(min_country_probability) };
-    
+
     // Build sort
     let sortObj = { createdAt: -1 };
     if (sort_by) {
@@ -107,27 +106,42 @@ async function getAllProfiles(req, res, next) {
       const sortField = fieldMap[sort_by];
       if (sortField) sortObj = { [sortField]: order === 'asc' ? 1 : -1 };
     }
-    
+
     // Pagination
     const pageNum = parseInt(page) || 1;
     let limitNum = parseInt(limit) || 10;
     if (limitNum > 50) limitNum = 50;
     const skip = (pageNum - 1) * limitNum;
-    
+
     // Execute queries
     const total = await Profile.countDocuments(filter);
+    const totalPages = Math.ceil(total / limitNum);
     const profiles = await Profile.find(filter)
       .sort(sortObj)
       .skip(skip)
       .limit(limitNum)
       .select('-normalizedName');
-    
+
+    // Build pagination links
+    const baseUrl = req.protocol + '://' + req.get('host') + req.baseUrl + req.path;
+    const queryParams = new URLSearchParams(req.query);
+    queryParams.set('page', pageNum);
+    queryParams.set('limit', limitNum);
+
+    const links = {
+      self: `${baseUrl}?${queryParams.toString()}`,
+      next: pageNum < totalPages ? `${baseUrl}?${new URLSearchParams({ ...req.query, page: pageNum + 1, limit: limitNum }).toString()}` : null,
+      prev: pageNum > 1 ? `${baseUrl}?${new URLSearchParams({ ...req.query, page: pageNum - 1, limit: limitNum }).toString()}` : null
+    };
+
     const data = profiles.map(p => p.toJSON());
     return res.status(200).json({
       status: 'success',
       page: pageNum,
       limit: limitNum,
       total,
+      total_pages: totalPages,
+      links,
       data
     });
   } catch (error) {
@@ -135,7 +149,7 @@ async function getAllProfiles(req, res, next) {
   }
 }
 
-// ---------- DELETE /api/profiles/:id (unchanged) ----------
+// ---------- DELETE /api/profiles/:id ----------
 async function deleteProfile(req, res, next) {
   try {
     const { id } = req.params;
@@ -145,7 +159,7 @@ async function deleteProfile(req, res, next) {
     if (!deletedProfile) return res.status(404).json({ error: 'Profile not found' });
     return res.status(204).send();
   } catch (error) {
-    if (error.name === 'CastError') return res.status(400).json({ error: 'Invalid profile ID format' });
+    if (error.name === 'CastError') return res.status(400). json({ error: 'Invalid profile ID format' });
     next(error);
   }
 }
@@ -155,14 +169,11 @@ const parseNaturalQuery = (q) => {
   if (!q || typeof q !== 'string') return null;
   const queryLower = q.toLowerCase();
   const filters = {};
-  
-  // Gender detection
+
   if (queryLower.includes('male')) filters.gender = 'male';
   else if (queryLower.includes('female')) filters.gender = 'female';
-  
-  // Age group detection (priority over min/max age for simple cases)
-  if (queryLower.includes('teenager') || queryLower.includes('teens') || queryLower.includes('young')) {
-    // "young" maps to age 16-24, but also can be combined with teenager logic
+
+  if (queryLower.includes('teenager') || queryLower.includes('teens') || (queryLower.includes('young') && !queryLower.includes('teenager'))) {
     if (queryLower.includes('young') && !queryLower.includes('teenager')) {
       filters.min_age = 16;
       filters.max_age = 24;
@@ -173,14 +184,12 @@ const parseNaturalQuery = (q) => {
   if (queryLower.includes('adult')) filters.age_group = 'adult';
   if (queryLower.includes('senior') || queryLower.includes('old')) filters.age_group = 'senior';
   if (queryLower.includes('child') || queryLower.includes('kid')) filters.age_group = 'child';
-  
-  // Age range: "above X", "below X", "above 30", "below 18", "above 17" etc.
+
   const aboveMatch = queryLower.match(/above\s+(\d+)/);
   if (aboveMatch) filters.min_age = parseInt(aboveMatch[1]);
   const belowMatch = queryLower.match(/below\s+(\d+)/);
   if (belowMatch) filters.max_age = parseInt(belowMatch[1]);
-  
-  // Country: "from nigeria", "from angola", "people from kenya"
+
   const countryMatch = queryLower.match(/from\s+([a-z]+)/);
   if (countryMatch) {
     const countryMap = {
@@ -190,14 +199,7 @@ const parseNaturalQuery = (q) => {
     const countryName = countryMatch[1];
     filters.country_id = countryMap[countryName] || countryName.toUpperCase();
   }
-  
-  // Combine "young" with gender etc.
-  if (queryLower.includes('young') && !filters.age_group && !filters.min_age) {
-    filters.min_age = 16;
-    filters.max_age = 24;
-  }
-  
-  // If nothing could be parsed, return null
+
   if (Object.keys(filters).length === 0) return null;
   return filters;
 };
@@ -212,8 +214,7 @@ async function searchProfiles(req, res, next) {
     if (!parsed) {
       return res.status(400).json({ status: 'error', message: 'Unable to interpret query' });
     }
-    
-    // Build filter from parsed fields
+
     const filter = {};
     if (parsed.gender) filter.gender = parsed.gender;
     if (parsed.age_group) filter.ageGroup = parsed.age_group;
@@ -223,26 +224,39 @@ async function searchProfiles(req, res, next) {
       if (parsed.min_age) filter.age.$gte = parsed.min_age;
       if (parsed.max_age) filter.age.$lte = parsed.max_age;
     }
-    
-    // Pagination
+
     const pageNum = parseInt(page) || 1;
     let limitNum = parseInt(limit) || 10;
     if (limitNum > 50) limitNum = 50;
     const skip = (pageNum - 1) * limitNum;
-    
+
     const total = await Profile.countDocuments(filter);
+    const totalPages = Math.ceil(total / limitNum);
     const profiles = await Profile.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limitNum)
       .select('-normalizedName');
-    
+
+    const baseUrl = req.protocol + '://' + req.get('host') + req.baseUrl + req.path;
+    const queryParams = new URLSearchParams(req.query);
+    queryParams.set('page', pageNum);
+    queryParams.set('limit', limitNum);
+
+    const links = {
+      self: `${baseUrl}?${queryParams.toString()}`,
+      next: pageNum < totalPages ? `${baseUrl}?${new URLSearchParams({ ...req.query, page: pageNum + 1, limit: limitNum }).toString()}` : null,
+      prev: pageNum > 1 ? `${baseUrl}?${new URLSearchParams({ ...req.query, page: pageNum - 1, limit: limitNum }).toString()}` : null
+    };
+
     const data = profiles.map(p => p.toJSON());
     return res.status(200).json({
       status: 'success',
       page: pageNum,
       limit: limitNum,
       total,
+      total_pages: totalPages,
+      links,
       data
     });
   } catch (error) {
