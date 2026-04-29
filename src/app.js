@@ -2,7 +2,7 @@ const cookieParser = require('cookie-parser');
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
-const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
+const { rateLimit, ipKeyGenerator, forwardedHeader } = require('express-rate-limit');
 
 const app = express();
 
@@ -28,21 +28,21 @@ app.use(cors({
 const authLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
-  message: { status: 'error', message: 'Too many requests, please try again later.' },
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  keyGenerator: (req) => forwardedHeader(req) || ipKeyGenerator(req),
+  message: { status: 'error', message: 'Too many requests, please try again later.' }
 });
 
-// General API limiter – 60 requests per minute per user (or per IP if not authenticated)
-// The keyGenerator uses the logged‑in user id or falls back to a safe IPv6‑aware IP key
+// General API limiter – 60 requests per minute per user (or IP)
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
   keyGenerator: (req) => {
     // If user is authenticated, use their ID
     if (req.user && req.user.id) return req.user.id;
-    // Otherwise, use the safe IP key generator (handles both IPv4 and IPv6)
-    return ipKeyGenerator(req);
+    // Otherwise, use forwarded header or IP
+    return forwardedHeader(req) || ipKeyGenerator(req);
   },
   message: { status: 'error', message: 'Rate limit exceeded' }
 });
